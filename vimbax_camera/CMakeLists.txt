@@ -72,6 +72,14 @@ install(DIRECTORY
   DESTINATION share/${PROJECT_NAME}/
 )
 
+# Install scripts.
+install(
+  PROGRAMS
+    scripts/load_camera_config.py
+  DESTINATION
+    share/${PROJECT_NAME}/scripts
+)
+
 if(BUILD_TESTING)
     find_package(ament_lint_auto REQUIRED)
 
