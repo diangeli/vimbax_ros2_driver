@@ -24,6 +24,9 @@ find_package(camera_info_manager REQUIRED)
 find_package(vimbax_camera_msgs REQUIRED)
 find_package(vimbax_camera_events REQUIRED)
 find_package(vmbc_interface REQUIRED)
+find_package(diagnostic_msgs REQUIRED)
+find_package(sensor_msgs REQUIRED)
+find_package(message_filters REQUIRED)
 
 add_library(${PROJECT_NAME} SHARED ${vimbax_camera_node_SRCS})
 target_include_directories(${PROJECT_NAME} PUBLIC
@@ -55,7 +58,12 @@ install(TARGETS ${PROJECT_NAME}
 )
 
 add_executable(multi_camera_synchronisation src/multi_camera_synchronisation.cpp)
-ament_target_dependencies(multi_camera_synchronisation rclcpp sensor_msgs)
+ament_target_dependencies(multi_camera_synchronisation 
+    rclcpp 
+    sensor_msgs
+    diagnostic_msgs
+    message_filters
+)
 install(TARGETS
         multi_camera_synchronisation
         DESTINATION lib/${PROJECT_NAME})

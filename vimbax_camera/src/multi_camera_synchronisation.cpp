@@ -1,197 +1,202 @@
 #include <rclcpp/rclcpp.hpp>
-#include "sensor_msgs/msg/camera_info.hpp"
-#include "std_msgs/msg/header.hpp"
+#include <sensor_msgs/msg/camera_info.hpp>
+#include <chrono>
+#include <memory>
+#include <string>
+#include <cmath>
+#include <thread>
+#include <atomic>
 
-class MasterCameraSubscriber : public rclcpp::Node
-{
+namespace camera_sync {
+
+// Configuration constants
+constexpr const char* MASTER_CAMERA_TOPIC = "/vimbax_camera_ir/camera_info";
+constexpr const char* SLAVE_CAMERA_TOPIC = "/vimbax_camera_rgb/camera_info";
+constexpr int QUEUE_SIZE = 1; // Use last message
+constexpr std::chrono::milliseconds SYNC_LOOP_RATE{10}; // Check at 100Hz
+constexpr int MAX_NODE_RECREATIONS = 1000;
+constexpr int CONSECUTIVE_SYNC_SUCCESSES_REQUIRED = 10;
+constexpr int MAX_CONSECUTIVE_FAILURES = 10;
+
+class CameraSubscriber : public rclcpp::Node {
 public:
-    MasterCameraSubscriber():
-        Node("master_camera_subscriber"),
-        stamp_(0)
-    {
-        initialize_subscription();
-        stamp_ = 0;
+    CameraSubscriber(const std::string& node_name, const std::string& topic)
+        : Node(node_name, rclcpp::NodeOptions().use_intra_process_comms(false)),
+          last_stamp_sec_(0),
+          last_stamp_nsec_(0),
+          has_new_message_(false) {
+        RCLCPP_INFO(get_logger(), "Creating subscriber for topic: %s", topic.c_str());
+        auto qos = rclcpp::QoS(rclcpp::KeepLast(QUEUE_SIZE));
+        sub_ = create_subscription<sensor_msgs::msg::CameraInfo>(
+            topic, qos,
+            [this](const sensor_msgs::msg::CameraInfo::SharedPtr msg) {
+                this->last_stamp_sec_ = msg->header.stamp.sec;
+                this->last_stamp_nsec_ = msg->header.stamp.nanosec;
+                this->has_new_message_ = true;
+            });
     }
 
-    void initialize_subscription() 
-    {
-        subscription_ = this->create_subscription<sensor_msgs::msg::CameraInfo>(
-            "/vimbax_camera_ir/camera_info", 10, std::bind(&MasterCameraSubscriber::topic_callback, this, std::placeholders::_1));
+    ~CameraSubscriber() {
+        RCLCPP_INFO(get_logger(), "Destroying subscriber for topic: %s", sub_->get_topic_name());
     }
 
-    void topic_callback(const sensor_msgs::msg::CameraInfo::SharedPtr msg) 
-    {
-        stamp_ = static_cast<double>(msg->header.stamp.nanosec);
+    bool has_new_message() {
+        return has_new_message_.exchange(false); // Atomically get and reset flag
     }
 
-    bool has_received_message()
-    {
-        if (stamp_ > 0) {
-            return true;
-        }
-        return false;
+    double get_timestamp_sec() const {
+        return static_cast<double>(last_stamp_sec_) + static_cast<double>(last_stamp_nsec_) / 1e9;
     }
-
-    // Variables
-    int stamp_;
 
 private:
-    // Subscribers
-    rclcpp::Subscription<sensor_msgs::msg::CameraInfo>::SharedPtr subscription_;
+    rclcpp::Subscription<sensor_msgs::msg::CameraInfo>::SharedPtr sub_;
+    std::atomic<int32_t> last_stamp_sec_;
+    std::atomic<uint32_t> last_stamp_nsec_;
+    std::atomic<bool> has_new_message_;
 };
 
-class SlaveCameraSubscriber : public rclcpp::Node
-{
+class SyncManager : public rclcpp::Node {
 public:
-    SlaveCameraSubscriber():
-        Node("slave_camera_subscriber"),
-        stamp_(0)
-    {
-        initialize_subscription();
-        stamp_ = 0;
-    }
+    enum class SyncState { ATTEMPTING_SYNC, MONITORING, FAILED };
 
-    void initialize_subscription() 
-    {
-        subscription_ = this->create_subscription<sensor_msgs::msg::CameraInfo>(
-            "/vimbax_camera_rgb/camera_info", 10, std::bind(&SlaveCameraSubscriber::topic_callback, this, std::placeholders::_1));
-    }
+    explicit SyncManager(double time_threshold_ms)
+        : Node("sync_manager"),
+          time_threshold_ms_(time_threshold_ms),
+          state_(SyncState::ATTEMPTING_SYNC),
+          consecutive_successes_(0),
+          consecutive_failures_(0),
+          recreation_count_(0)
+          {
+        this->declare_parameter<bool>("verbose_monitoring", false);
+        this->get_parameter("verbose_monitoring", verbose_monitoring_);
 
-    void topic_callback(const sensor_msgs::msg::CameraInfo::SharedPtr msg) 
-    {
-        stamp_ = static_cast<double>(msg->header.stamp.nanosec);
-    }
+        RCLCPP_INFO(get_logger(), "SyncManager started with threshold: %.2f ms. Verbose monitoring: %s", 
+                    time_threshold_ms_, verbose_monitoring_ ? "true" : "false");
+        master_node_ = std::make_shared<CameraSubscriber>("master_camera_node", MASTER_CAMERA_TOPIC);
 
-    bool has_received_message()
-    {
-        if (stamp_ > 0.0) {
-            return true;
-        }
-        return false;
-    }
+        recreate_slave_node(false); // Initial creation
 
-    // Variables
-    int stamp_;
+        sync_timer_ = create_wall_timer(SYNC_LOOP_RATE, std::bind(&SyncManager::sync_loop, this));
+    }
 
 private:
-    // Subscribers
-    rclcpp::Subscription<sensor_msgs::msg::CameraInfo>::SharedPtr subscription_;
-};
-
-class NodeManager
-{
-public:
-    NodeManager(double time_threshold) : time_threshold_(time_threshold)
-    {
-        create_nodes();
-
-        diff_ = 0;
-        recreateCounter_ = 3;
-        ready_ = false;
-    }
-
-    void create_nodes()
-    {
-        create_master_node();
-        create_slave_node();
-        return;
-    }
-
-    void create_master_node()
-    {
-        masterNode_ = std::make_shared<MasterCameraSubscriber>();
-        RCLCPP_INFO(masterNode_->get_logger(), "Master node created");
-        return ;
-    }
-
-    void create_slave_node()
-    {
-        slaveNode_ = std::make_shared<SlaveCameraSubscriber>();
-        RCLCPP_INFO(slaveNode_->get_logger(), "Slave node created");
-        return;
-    }
-
-    // Method to delete and recreate the node
-    void recreate_slave_node()
-    {
-        // Delete the node (reset the shared pointer)
-        if (slaveNode_) {
-            RCLCPP_INFO(slaveNode_->get_logger(), "Deleting node...");
-            slaveNode_.reset();  // This deletes the node
-            RCLCPP_INFO(rclcpp::get_logger("NodeManager"), "Node deleted");
+    void recreate_slave_node(bool is_recreation = true) {
+        if (is_recreation) {
+            RCLCPP_WARN(get_logger(), "Max consecutive failures reached. Recreating slave node.");
+            if (slave_node_) {
+                RCLCPP_INFO(get_logger(), "Deleting slave node...");
+                slave_node_.reset();
+            }
+            RCLCPP_INFO(get_logger(), "Waiting for node to be fully destroyed...");
+            std::this_thread::sleep_for(std::chrono::milliseconds(200)); // Give time for cleanup
+            recreation_count_++;
         }
 
-        // Recreate the node
-        create_slave_node();
-        recreateCounter_ = 3;
-
-        return;
+        RCLCPP_INFO(get_logger(), "Creating slave node. Recreation #%d", recreation_count_);
+        slave_node_ = std::make_shared<CameraSubscriber>("slave_camera_node", SLAVE_CAMERA_TOPIC);
+        consecutive_successes_ = 0;
+        consecutive_failures_ = 0;
     }
 
-    // Spin the node while it exists
-    void spin_nodes()
-    {
-        if (!ready_) {
-            rclcpp::spin_some(masterNode_);
-            rclcpp::spin_some(slaveNode_);
+    void sync_loop() {
+        // Always spin nodes to clear message queues
+        rclcpp::spin_some(master_node_);
+        if(slave_node_) {
+            rclcpp::spin_some(slave_node_);
+        }
 
-            if (masterNode_->has_received_message() && slaveNode_->has_received_message()) {
-                // Calculate the difference between the two timestamps
-                diff_ = (masterNode_->stamp_ - slaveNode_->stamp_)/1000000.0;
-                RCLCPP_INFO(masterNode_->get_logger(), "Time difference in ms: '%f'", diff_);
-                
-                if (diff_ < time_threshold_ && diff_ > -time_threshold_) {
-                    ready_ = true;
-                    RCLCPP_INFO(masterNode_->get_logger(), "Ready");
-                    RCLCPP_INFO(masterNode_->get_logger(), "Time difference in ms: '%f'", diff_);
-                } 
+        if (state_ == SyncState::ATTEMPTING_SYNC) {
+            run_sync_attempt();
+        }
+        // No action needed for other states in this high-frequency loop
+    }
 
-                if (!ready_){
-                    RCLCPP_INFO(masterNode_->get_logger(), "Not ready");
-                    if ((diff_ > time_threshold_ || diff_ < -time_threshold_) && recreateCounter_ < 0) {
-                        RCLCPP_INFO(masterNode_->get_logger(), "Reset subscription to slave node");
-                        recreate_slave_node();
-                    }
-                }
+    void run_sync_attempt() {
+        if (recreation_count_ >= MAX_NODE_RECREATIONS) {
+            state_ = SyncState::FAILED;
+            RCLCPP_ERROR(get_logger(), "Exceeded max recreations. Giving up.");
+            sync_timer_->cancel();
+            return;
+        }
 
-                recreateCounter_--;
+        if (!master_node_->has_new_message() || !slave_node_ || !slave_node_->has_new_message()) {
+            RCLCPP_INFO_THROTTLE(get_logger(), *get_clock(), 1000, "Waiting for new messages from both cameras to attempt sync...");
+            return;
+        }
+
+        double master_ts = master_node_->get_timestamp_sec();
+        double slave_ts = slave_node_->get_timestamp_sec();
+        double diff_ms = std::abs(master_ts - slave_ts) * 1000.0;
+
+        if (diff_ms <= time_threshold_ms_) {
+            consecutive_failures_ = 0;
+            consecutive_successes_++;
+            RCLCPP_INFO(get_logger(), "Sync success %d/%d. Time difference: %.4f ms", consecutive_successes_, CONSECUTIVE_SYNC_SUCCESSES_REQUIRED, diff_ms);
+            
+            if (consecutive_successes_ >= CONSECUTIVE_SYNC_SUCCESSES_REQUIRED) {
+                RCLCPP_INFO(get_logger(), "Synchronization stable! Final difference: %.4f ms", diff_ms);
+                RCLCPP_INFO(get_logger(), "Total recreations: %d", recreation_count_);
+                state_ = SyncState::MONITORING;
+                sync_timer_->cancel(); // Stop attempting to sync
+                monitoring_timer_ = create_wall_timer(std::chrono::seconds(1), std::bind(&SyncManager::run_monitoring, this));
+            }
+        } else {
+            RCLCPP_INFO(get_logger(), "Sync failed. Time difference: %.4f ms. Resetting success streak.", diff_ms);
+            consecutive_successes_ = 0;
+            consecutive_failures_++;
+            if (consecutive_failures_ >= MAX_CONSECUTIVE_FAILURES) {
+                recreate_slave_node();
             }
         }
     }
 
-private:
-    std::shared_ptr<MasterCameraSubscriber> masterNode_;
-    std::shared_ptr<SlaveCameraSubscriber> slaveNode_;
+    void run_monitoring() {
+        rclcpp::spin_some(master_node_);
+        if (slave_node_) {
+            rclcpp::spin_some(slave_node_);
+        }
 
-    double diff_;
-    int recreateCounter_;
-    bool ready_;
-    double time_threshold_;  // Add time threshold
+        if (verbose_monitoring_) {
+            double master_ts = master_node_->get_timestamp_sec();
+            double slave_ts = slave_node_->get_timestamp_sec();
+            double diff_ms = (master_ts - slave_ts) * 1000.0;
+
+            RCLCPP_INFO(get_logger(), "[Monitoring] Time difference: %.4f ms", diff_ms);
+        }
+    }
+
+    double time_threshold_ms_;
+    SyncState state_;
+    int consecutive_successes_;
+    int consecutive_failures_;
+    int recreation_count_;
+    bool verbose_monitoring_;
+
+    std::shared_ptr<CameraSubscriber> master_node_;
+    std::shared_ptr<CameraSubscriber> slave_node_;
+    rclcpp::TimerBase::SharedPtr sync_timer_;
+    rclcpp::TimerBase::SharedPtr monitoring_timer_;
 };
 
-int main(int argc, char *argv[])
-{
+} // namespace camera_sync
+
+int main(int argc, char* argv[]) {
     rclcpp::init(argc, argv);
 
-    // Check for the time threshold argument from the command line
     if (argc < 2) {
-        RCLCPP_ERROR(rclcpp::get_logger("rclcpp"), "Usage: %s <time_threshold>", argv[0]);
+        RCLCPP_ERROR(rclcpp::get_logger("rclcpp"), "Usage: %s <time_threshold_ms>", argv[0]);
         return 1;
     }
 
-    // Convert the command line argument to a double value for time threshold
-    double time_threshold = std::stod(argv[1]);
-
-    // Create an instance of the node manager with the given time threshold
-    NodeManager manager(time_threshold);
-
-    // Spin to handle callbacks and node recreation
-    rclcpp::Rate loop_rate(100); 
-    while (rclcpp::ok()) {
-        manager.spin_nodes();
-        loop_rate.sleep();
+    double time_threshold_ms = 1.0;
+    try {
+        time_threshold_ms = std::stod(argv[1]);
+    } catch (const std::exception& e) {
+        RCLCPP_ERROR(rclcpp::get_logger("rclcpp"), "Invalid argument for time threshold. Using default 1.0 ms. Error: %s", e.what());
     }
 
+    auto sync_manager_node = std::make_shared<camera_sync::SyncManager>(time_threshold_ms);
+    rclcpp::spin(sync_manager_node);
     rclcpp::shutdown();
     return 0;
 }
