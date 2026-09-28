@@ -19,6 +19,7 @@ ACTION_KEYS = {'device_key': 1, 'group_key': 1, 'group_mask': 1}
 INTRA_PROCESS = [{'use_intra_process_comms': True}]
 RECORDER_PARAMS = {
     'storage_id': 'mcap',
+    'queue_frames': 1500,
     'image_topics': ['/vimbax_camera_rgb/image_raw', '/vimbax_camera_ir/image_raw'],
     'camera_info_topics': ['/vimbax_camera_rgb/camera_info', '/vimbax_camera_ir/camera_info'],
     'generic_topics': ['/wiris/thermal/image', '/wiris/thermal/camera_info',
