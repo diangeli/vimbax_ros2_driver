@@ -13,6 +13,9 @@ set(vimbax_camera_node_SRCS
         src/loader/vmbc_api.cpp
         src/vimbax_camera.cpp
         src/vimbax_camera_helper.cpp
+        src/stamp_pairer.cpp
+        src/sync_monitor_node.cpp
+        src/action_trigger_node.cpp
 )
 
 # find dependencies
@@ -24,9 +27,7 @@ find_package(camera_info_manager REQUIRED)
 find_package(vimbax_camera_msgs REQUIRED)
 find_package(vimbax_camera_events REQUIRED)
 find_package(vmbc_interface REQUIRED)
-find_package(diagnostic_msgs REQUIRED)
 find_package(sensor_msgs REQUIRED)
-find_package(message_filters REQUIRED)
 
 add_library(${PROJECT_NAME} SHARED ${vimbax_camera_node_SRCS})
 target_include_directories(${PROJECT_NAME} PUBLIC
@@ -51,22 +52,21 @@ rclcpp_components_register_node(${PROJECT_NAME}
     EXECUTOR MultiThreadedExecutor
 )
 
+rclcpp_components_register_node(${PROJECT_NAME}
+    PLUGIN "vimbax_camera::ActionTriggerNode"
+    EXECUTABLE action_trigger_node
+)
+
+rclcpp_components_register_node(${PROJECT_NAME}
+    PLUGIN "vimbax_camera::SyncMonitorNode"
+    EXECUTABLE sync_monitor_node
+)
+
 install(TARGETS ${PROJECT_NAME}
         ARCHIVE DESTINATION lib
         LIBRARY DESTINATION lib
         RUNTIME DESTINATION bin
 )
-
-add_executable(multi_camera_synchronisation src/multi_camera_synchronisation.cpp)
-ament_target_dependencies(multi_camera_synchronisation 
-    rclcpp 
-    sensor_msgs
-    diagnostic_msgs
-    message_filters
-)
-install(TARGETS
-        multi_camera_synchronisation
-        DESTINATION lib/${PROJECT_NAME})
 
 # Install launch files.
 install(DIRECTORY

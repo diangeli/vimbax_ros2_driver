@@ -39,3 +39,11 @@ target_link_libraries(
         ${PROJECT_NAME}_vimbax_camera_test
         ${PROJECT_NAME}
 )
+
+ament_add_gtest(${PROJECT_NAME}_stamp_pairer_test
+        stamp_pairer_test.cpp
+)
+target_link_libraries(
+        ${PROJECT_NAME}_stamp_pairer_test
+        ${PROJECT_NAME}
+)
