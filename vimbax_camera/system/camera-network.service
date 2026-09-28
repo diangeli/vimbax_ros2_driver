@@ -1,0 +1,18 @@
+[Unit]
+Description=Camera network on eth0 (jumbo frames, camera subnet addresses)
+BindsTo=sys-subsystem-net-devices-eth0.device
+After=sys-subsystem-net-devices-eth0.device
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/sbin/ip link set eth0 down
+# nvethernet only accepts an MTU change while the link is down.
+ExecStart=/usr/sbin/ip link set eth0 mtu 9000
+ExecStart=/usr/sbin/ip addr replace 192.168.1.140/24 dev eth0
+# The cameras send PTP via their gateway 192.168.1.1; answering as it lets PTP lock.
+ExecStart=/usr/sbin/ip addr replace 192.168.1.1/24 dev eth0
+ExecStart=/usr/sbin/ip link set eth0 up
+
+[Install]
+WantedBy=multi-user.target

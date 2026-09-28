@@ -1,0 +1,13 @@
+[Unit]
+Description=PTP grandmaster for the GigE cameras on eth0
+Requires=camera-network.service
+After=camera-network.service
+
+[Service]
+# nvethernet needs a longer TX timestamp timeout than the default.
+ExecStart=/usr/local/sbin/ptp4l -i eth0 -4 -E --tx_timestamp_timeout=100 -m -q
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target
