@@ -13,6 +13,8 @@ ExecStart=/usr/sbin/ip addr replace 192.168.1.140/24 dev eth0
 # The cameras send PTP via their gateway 192.168.1.1; answering as it lets PTP lock.
 ExecStart=/usr/sbin/ip addr replace 192.168.1.1/24 dev eth0
 ExecStart=/usr/sbin/ip link set eth0 up
+# At boot nvethernet can reset the MTU to 1500 right after it is set; re-apply until it sticks.
+ExecStartPost=/bin/sh -c 'for i in 1 2 3 4 5; do sleep 2; [ "$$(cat /sys/class/net/eth0/mtu)" -ge 8000 ] && exit 0; ip link set eth0 down; ip link set eth0 mtu 9000; ip link set eth0 up; done; exit 1'
 
 [Install]
 WantedBy=multi-user.target

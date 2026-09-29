@@ -44,7 +44,7 @@ def main():
     parser.add_argument('--trigger-rate-hz', type=float, default=30.0)
     parser.add_argument('--exposure-auto-max-us', type=int, default=20000)
     parser.add_argument('--ptp', choices=['off', 'auto', 'slave'], default='slave')
-    parser.add_argument('--ptp-timeout-s', type=float, default=30.0)
+    parser.add_argument('--ptp-timeout-s', type=float, default=90.0)
     parser.add_argument('--min-packet-size', type=int, default=8000)
     args = parser.parse_args()
 
