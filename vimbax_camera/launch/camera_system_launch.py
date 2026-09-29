@@ -68,8 +68,8 @@ def generate_launch_description():
         executable='component_container_mt',
         sigterm_timeout='30',
         composable_node_descriptions=[
-            camera_node('vimbax_camera_rgb', '192.168.1.40'),
-            camera_node('vimbax_camera_ir', '192.168.1.45'),
+            camera_node('vimbax_camera_rgb', '192.168.50.40'),
+            camera_node('vimbax_camera_ir', '192.168.50.45'),
             ComposableNode(
                 package='vimbax_camera',
                 plugin='vimbax_camera::ActionTriggerNode',
