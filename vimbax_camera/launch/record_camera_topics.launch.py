@@ -1,47 +1,31 @@
 #!/usr/bin/env python3
-"""
-Camera Topics Recording Launch File
-
-This launch file starts recording all camera topics to a rosbag.
-The rosbag is saved with a timestamp in the filename.
-"""
-
 import os
-from datetime import datetime
+import sys
+
 from launch import LaunchDescription
-from launch.actions import ExecuteProcess
+from launch.actions import DeclareLaunchArgument
 from launch.substitutions import LaunchConfiguration
+from launch_ros.actions import LoadComposableNodes
+from launch_ros.descriptions import ComposableNode
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from camera_system_launch import INTRA_PROCESS, RECORDER_PARAMS  # noqa: E402
+
 
 def generate_launch_description():
-    # Create timestamp for the bag filename
-    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-    bag_filename = f'camera_system_{timestamp}'
-    
-    # Define the topics to record
-    topics_to_record = [
-        '/vimbax_camera_ir/camera_info',
-        '/vimbax_camera_ir/image_raw',
-        '/vimbax_camera_ir/image_raw/compressed',
-        '/vimbax_camera_rgb/camera_info',
-        '/vimbax_camera_rgb/image_raw',
-        '/vimbax_camera_rgb/image_raw/compressed',
-        '/wiris/thermal/camera_info',
-        '/wiris/thermal/image',
-        '/wiris/thermal/image/camera_info',
-        '/wiris/thermal/image/compressed'
-    ]
-    
-    # Create the rosbag record command
-    rosbag_record = ExecuteProcess(
-        cmd=[
-            'ros2', 'bag', 'record',
-            '--output', bag_filename,
-            *topics_to_record
-        ],
-        output='screen'
-    )
-    
-    # Create and return the launch description
     return LaunchDescription([
-        rosbag_record
-    ]) 
+        DeclareLaunchArgument('container', default_value='/camera_container'),
+        DeclareLaunchArgument('bag_dir', default_value='~/bags'),
+        LoadComposableNodes(
+            target_container=LaunchConfiguration('container'),
+            composable_node_descriptions=[
+                ComposableNode(
+                    package='camera_recorder',
+                    plugin='camera_recorder::RecorderNode',
+                    name='recorder',
+                    parameters=[{'output_dir': LaunchConfiguration('bag_dir'), **RECORDER_PARAMS}],
+                    extra_arguments=INTRA_PROCESS,
+                ),
+            ],
+        ),
+    ])

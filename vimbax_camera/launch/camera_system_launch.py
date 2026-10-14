@@ -1,81 +1,117 @@
 #!/usr/bin/env python3
-"""
-Camera System Launch File
-
-This launch file orchestrates the initialization and execution of multiple camera nodes
-in a specific sequence to ensure proper system operation. It handles:
-1. Camera configuration loading
-2. VimbaX camera initialization (IR and RGB)
-3. Multi-camera synchronization
-4. WIRIS thermal camera integration
-"""
-
 import os
 
+from ament_index_python import get_package_share_directory
 from launch import LaunchDescription
-from launch.actions import ExecuteProcess, IncludeLaunchDescription, DeclareLaunchArgument, RegisterEventHandler
+from launch.actions import (DeclareLaunchArgument, EmitEvent, ExecuteProcess,
+                            IncludeLaunchDescription, LogInfo, RegisterEventHandler)
+from launch.conditions import IfCondition, LaunchConfigurationEquals
 from launch.event_handlers import OnProcessExit
+from launch.events import Shutdown
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration, PathJoinSubstitution
-from launch_ros.actions import Node
+from launch_ros.actions import ComposableNodeContainer, Node
+from launch_ros.descriptions import ComposableNode, ParameterValue
+from launch_ros.substitutions import FindPackageShare
 
-from ament_index_python import get_package_share_directory
-
-# Default folder name (can be overridden on the command line)
 DEFAULT_CONFIG_FOLDER = '/home/osar/drone_ws/src/vimbax_ros2_driver/vimbax_camera/params/params30_8_8_color'
-SYNC_TIME_THRESHOLD = '1'  # in milliseconds
+ACTION_KEYS = {'device_key': 1, 'group_key': 1, 'group_mask': 1}
+INTRA_PROCESS = [{'use_intra_process_comms': True}]
+RECORDER_PARAMS = {
+    'storage_id': 'mcap',
+    'queue_frames': 1500,
+    'image_topics': ['/vimbax_camera_rgb/image_raw', '/vimbax_camera_ir/image_raw'],
+    'camera_info_topics': ['/vimbax_camera_rgb/camera_info', '/vimbax_camera_ir/camera_info'],
+    'generic_topics': ['/wiris/thermal/image', '/wiris/thermal/camera_info',
+                       '/wiris/thermal/image/camera_info'],
+}
 
-def generate_launch_description():
-    # 1. Declare the config_folder argument so users can override it:
-    config_folder_arg = DeclareLaunchArgument(
-        'config_folder',
-        default_value=DEFAULT_CONFIG_FOLDER,
-        description='Folder (inside vimbax_camera share) containing camera configuration files'
+
+def camera_node(name, camera_id):
+    return ComposableNode(
+        package='vimbax_camera',
+        plugin='vimbax_camera::VimbaXCameraNode',
+        namespace=name,
+        name=name,
+        parameters=[{
+            'camera_id': camera_id,
+            'use_ros_time': ParameterValue(LaunchConfiguration('use_ros_time'), value_type=bool),
+        }],
+        extra_arguments=INTRA_PROCESS,
     )
 
-    # 2. Compute absolute paths to the two packages
+
+def generate_launch_description():
     vimbax_camera_pkg = get_package_share_directory('vimbax_camera')
     wiris_pkg = get_package_share_directory('wiris_pro_driver')
 
-    # 3. ExecuteProcess that runs the Python config script
-    #    (We assume you've moved load_camera_config.py into 'scripts/' in the installed share directory,
-    #     or you have installed it as a console script. Here we'll assume scripts/)
     load_config = ExecuteProcess(
         cmd=[
             'python',
             os.path.join(vimbax_camera_pkg, 'scripts', 'load_camera_config.py'),
             '--settings_folder',
-            PathJoinSubstitution([
-                vimbax_camera_pkg,
-                'params',
-                LaunchConfiguration('config_folder')
-            ])
+            PathJoinSubstitution([vimbax_camera_pkg, 'params', LaunchConfiguration('config_folder')]),
+            '--trigger', LaunchConfiguration('trigger'),
+            '--action-keys', *(str(key) for key in ACTION_KEYS.values()),
+            '--trigger-rate-hz', LaunchConfiguration('trigger_rate_hz'),
+            '--exposure-auto-max-us', LaunchConfiguration('exposure_auto_max_us'),
+            '--ptp', LaunchConfiguration('ptp'),
         ],
         output='screen',
         name='load_camera_config'
     )
 
-    # 4. Once load_config finishes, start all camera nodes.
-    #    We’ll wrap everything else in an OnProcessExit handler so it only launches after load_config is done.
-    # 4a. Include the VimbaX camera launch (passing the same config_folder)
-    vimbax_launch = IncludeLaunchDescription(
-        PythonLaunchDescriptionSource(
-            os.path.join(vimbax_camera_pkg, 'launch', 'vimbax_camera_launch.py')
-        ),
-        launch_arguments={'config_folder': LaunchConfiguration('config_folder')}.items()
-    )
-
-    # 4b. Multi-camera synchronization node (ensure the 'executable' name is spelled exactly as installed)
-    sync_node = Node(
-        package='vimbax_camera',
-        executable='multi_camera_synchronisation',   # <-- check exact spelling in your CMakeLists
-        name='multi_camera_sync',
-        arguments=[SYNC_TIME_THRESHOLD],
+    camera_container = ComposableNodeContainer(
+        name='camera_container',
+        namespace='',
+        package='rclcpp_components',
+        executable='component_container_mt',
+        sigterm_timeout='30',
+        composable_node_descriptions=[
+            camera_node('vimbax_camera_rgb', '192.168.1.40'),
+            camera_node('vimbax_camera_ir', '192.168.1.45'),
+            ComposableNode(
+                package='vimbax_camera',
+                plugin='vimbax_camera::ActionTriggerNode',
+                name='action_trigger',
+                parameters=[{
+                    'rate_hz': ParameterValue(LaunchConfiguration('trigger_rate_hz'), value_type=float),
+                    'interface_id': LaunchConfiguration('camera_interface'),
+                    **ACTION_KEYS,
+                }],
+                extra_arguments=INTRA_PROCESS,
+                condition=LaunchConfigurationEquals('trigger', 'action'),
+            ),
+            ComposableNode(
+                package='vimbax_camera',
+                plugin='vimbax_camera::SyncMonitorNode',
+                name='sync_monitor',
+                extra_arguments=INTRA_PROCESS,
+            ),
+            ComposableNode(
+                package='camera_recorder',
+                plugin='camera_recorder::RecorderNode',
+                name='recorder',
+                parameters=[{'output_dir': LaunchConfiguration('bag_dir'), **RECORDER_PARAMS}],
+                extra_arguments=INTRA_PROCESS,
+                condition=IfCondition(LaunchConfiguration('record')),
+            ),
+        ],
         output='screen',
-        parameters=[{'use_ros_time': True}]
     )
 
-    # 4c. WIRIS thermal camera node, pointing at a YAML in share/wiris_pro_driver/params/
+    detector = IncludeLaunchDescription(
+        PythonLaunchDescriptionSource(
+            PathJoinSubstitution([FindPackageShare('drone_detection'), 'launch', 'detection_launch.py'])
+        ),
+        launch_arguments={
+            'container': '/camera_container',
+            'image_topic': '/vimbax_camera_rgb/image_raw',
+            'model_path': LaunchConfiguration('model_path'),
+        }.items(),
+        condition=IfCondition(LaunchConfiguration('detector')),
+    )
+
     wiris_thermal = Node(
         package='wiris_pro_driver',
         executable='wiris_thermal_node',
@@ -84,22 +120,28 @@ def generate_launch_description():
         output='screen'
     )
 
-    # 5. Use an event handler so that everything in "camera_group" only starts after load_config exits
-    camera_group = [vimbax_launch, sync_node, wiris_thermal]
-    sequenced_camera_group = RegisterEventHandler(
-        OnProcessExit(
-            target_action=load_config,
-            on_exit=camera_group
-        )
-    )
+    def start_cameras_if_configured(event, context):
+        if event.returncode == 0:
+            return [camera_container, detector, wiris_thermal]
+        reason = f'load_camera_config exited with code {event.returncode}; cameras not started'
+        return [LogInfo(msg=reason), EmitEvent(event=Shutdown(reason=reason))]
 
-    # 6. Build the LaunchDescription
-    ld = LaunchDescription()
-    # 6a. Add the launch‐argument first
-    ld.add_action(config_folder_arg)
-    # 6b. Kick off load_config immediately
-    ld.add_action(load_config)
-    # 6c. Only once load_config completes, spawn the rest
-    ld.add_action(sequenced_camera_group)
-
-    return ld
+    return LaunchDescription([
+        DeclareLaunchArgument(
+            'config_folder',
+            default_value=DEFAULT_CONFIG_FOLDER,
+            description='Folder (inside vimbax_camera share) containing camera configuration files'
+        ),
+        DeclareLaunchArgument('trigger', default_value='action'),
+        DeclareLaunchArgument('trigger_rate_hz', default_value='30.0'),
+        DeclareLaunchArgument('camera_interface', default_value='eth0'),
+        DeclareLaunchArgument('exposure_auto_max_us', default_value='20000'),
+        DeclareLaunchArgument('ptp', default_value='slave'),
+        DeclareLaunchArgument('use_ros_time', default_value='false'),
+        DeclareLaunchArgument('record', default_value='false'),
+        DeclareLaunchArgument('bag_dir', default_value='~/bags'),
+        DeclareLaunchArgument('detector', default_value='false'),
+        DeclareLaunchArgument('model_path', default_value=''),
+        load_config,
+        RegisterEventHandler(OnProcessExit(target_action=load_config, on_exit=start_cameras_if_configured)),
+    ])

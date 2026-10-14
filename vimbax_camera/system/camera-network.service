@@ -1,0 +1,13 @@
+[Unit]
+Description=Camera network on eth0 (jumbo frames, camera subnet addresses)
+BindsTo=sys-subsystem-net-devices-eth0.device
+After=sys-subsystem-net-devices-eth0.device
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+TimeoutStartSec=90
+ExecStart=/usr/local/sbin/camera-network-up.sh
+
+[Install]
+WantedBy=multi-user.target
